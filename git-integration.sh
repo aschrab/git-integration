@@ -29,6 +29,7 @@ cat!       show the instruction sheet for a branch
 status!    show the status of a branch
 abort!     abort an in-progress rebuild
 continue!  continue an in-progress rebuild
+skip!      skip a branch during a rebuild
  Inline actions:
 add=       appends a 'merge <branch>' line to the instruction sheet
  Options:
@@ -285,13 +286,18 @@ finish_integration () {
 }
 
 do_merge () {
-	local brance_to_merge merge_msg merge_opts
+	local brance_to_merge rev merge_msg merge_opts
 	branch_to_merge=$1
 	shift
 
 	test -n "$branch_to_merge" || break_integration
 
-	if test "$skip_commit" = "$(git rev-parse --quiet $branch_to_merge)"
+	rev=$(git rev-parse --quiet --verify $branch_to_merge) || {
+		echo >&2 "No such revision: $branch_to_merge"
+		break_integration
+	}
+
+	if test "$skip_commit" = "$rev"
 	then
 		echo "Merged branch ${branch_to_merge}."
 		merged="$merged$branch_to_merge$LF"
@@ -299,9 +305,7 @@ do_merge () {
 	fi
 
 	merge_msg=$(
-		printf '%s\t\tbranch %s' \
-			$(git rev-parse --quiet --verify $branch_to_merge) \
-			$branch_to_merge |
+		printf '%s\t\tbranch %s' $rev $branch_to_merge |
 		git fmt-merge-msg --log --message \
 			"Merge branch '$branch_to_merge' into ${branch#refs/heads/}" |
 		git stripspace --strip-comments &&
@@ -403,8 +407,8 @@ integration_abort () {
 	rm -rf "$state_dir"
 }
 
-integration_continue () {
-	test $# = 0 || usage
+integration_continue_or_skip () {
+	action=$1
 
 	local branch skip_commit merged
 	branch=$(cat "$head_file" 2>/dev/null) ||
@@ -415,13 +419,25 @@ integration_continue () {
 		# We are being called to continue an existing operation,
 		# without the user having manually committed the result of
 		# resolving conflicts.
-		git update-index --ignore-submodules --refresh &&
-		git diff-files --quiet --ignore-submodules ||
-		die "You must edit all merge conflicts and then mark them as resolved using git add"
+		git update-index --ignore-submodules --refresh --unmerged >/dev/null
 
 		skip_commit=$(cat "$GIT_DIR/MERGE_HEAD")
 
-		git commit --no-edit || die
+		case "$action" in
+		continue)
+			git diff-files --quiet --ignore-submodules ||
+			die "You must edit all merge conflicts and then mark them as resolved using git add"
+
+			git commit --no-edit || die
+			;;
+		skip)
+			git merge --abort &&
+			git reset --hard || die
+			;;
+		*)
+			die "BUG: unknown action: $action"
+			;;
+		esac
 	fi
 
 	merged=$(cat "$merged_file")
@@ -568,7 +584,7 @@ do
 	--status)
 		do_status=1
 		;;
-	--abort|--continue)
+	--abort|--continue|--skip)
 		test -z "$action" || usage
 		test $total_argc -eq 2 || usage
 		action=${1##--}
@@ -611,8 +627,8 @@ then
 fi
 
 case $action in
-	continue)
-		integration_continue
+	continue|skip)
+		integration_continue_or_skip "$action"
 		exit
 		;;
 	abort)
